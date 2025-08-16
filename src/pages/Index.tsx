@@ -1,7 +1,7 @@
-import WalletFinder from '@/components/WalletFinder';
+import WalletIntelligencePlatform from '@/components/WalletIntelligencePlatform';
 
 const Index = () => {
-  return <WalletFinder />;
+  return <WalletIntelligencePlatform />;
 };
 
 export default Index;
