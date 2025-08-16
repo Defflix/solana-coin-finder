@@ -3,6 +3,8 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { Progress } from '@/components/ui/progress';
 import { Badge } from '@/components/ui/badge';
 import { Copy, Download, Loader2, Wallet, Search } from 'lucide-react';
@@ -24,7 +26,7 @@ const WalletFinder = () => {
   const { toast } = useToast();
 
   // Initialize Solana connection
-  const connection = new Connection('https://api.mainnet-beta.solana.com');
+  const [rpcUrl, setRpcUrl] = useState('https://rpc.ankr.com/solana');
 
   const validateTokenAddress = (address: string): boolean => {
     try {
@@ -38,7 +40,9 @@ const WalletFinder = () => {
   const fetchTokenHolders = async (tokenAddress: string): Promise<string[]> => {
     try {
       const mintKey = new PublicKey(tokenAddress);
-      
+      // Create connection per request using current RPC URL
+      const connection = new Connection(rpcUrl, 'confirmed');
+
       // Get token accounts for this mint
       const tokenAccounts = await connection.getProgramAccounts(
         new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'), // Token Program ID
@@ -235,6 +239,17 @@ const WalletFinder = () => {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="rpc-endpoint">RPC endpoint</Label>
+                <Input
+                  id="rpc-endpoint"
+                  placeholder="https://rpc.ankr.com/solana"
+                  value={rpcUrl}
+                  onChange={(e) => setRpcUrl(e.target.value)}
+                  disabled={isProcessing}
+                  className="bg-secondary/50 border-border/50"
+                />
+              </div>
               <Textarea
                 placeholder="Enter Solana token addresses (one per line)&#10;Example:&#10;EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&#10;So11111111111111111111111111111111111111112"
                 value={tokenAddresses}
