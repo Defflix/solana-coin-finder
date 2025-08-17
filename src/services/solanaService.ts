@@ -26,15 +26,41 @@ export interface FilterConfig {
   botFrequencyThreshold: number;
 }
 
+// Blocklist of well-known protocol program IDs and service addresses (expandable)
+const BLOCKLIST_ADDRESSES = new Set<string>([
+  // Jupiter Aggregator v6
+  'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4',
+  // Raydium AMM (legacy v4) and CP-Swap
+  '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8',
+  'CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C',
+  // Orca Whirlpools
+  'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc',
+]);
+
+const EXCHANGE_KEYWORDS = [
+  'exchange','binance','coinbase','kraken','okx','bybit','cex','gate','kucoin','mexc','bitfinex','bitstamp','huobi'
+];
+
+const PROTOCOL_KEYWORDS = [
+  'jupiter','raydium','orca','serum','openbook','mango','saber','marinade','solblaze','wormhole','pyth','protocol'
+];
+
 export class SolanaService {
   private connection: Connection;
   private fallbackConnection: Connection;
   private backupConnection: Connection;
+  private solanafmApiKey?: string;
 
-  constructor(rpcEndpoint: string, fallbackRpcEndpoint: string, backupRpcEndpoint: string = 'https://solana-rpc.publicnode.com') {
+  constructor(
+    rpcEndpoint: string,
+    fallbackRpcEndpoint: string,
+    backupRpcEndpoint: string = 'https://solana-rpc.publicnode.com',
+    solanafmApiKey?: string
+  ) {
     this.connection = new Connection(rpcEndpoint, 'confirmed');
     this.fallbackConnection = new Connection(fallbackRpcEndpoint, 'confirmed');
     this.backupConnection = new Connection(backupRpcEndpoint, 'confirmed');
+    this.solanafmApiKey = solanafmApiKey;
   }
 
   async fetchTokenHolders(tokenAddress: string): Promise<string[]> {
@@ -136,14 +162,19 @@ export class SolanaService {
 
   async fetchWalletLabels(addresses: string[]): Promise<WalletLabel[]> {
     try {
-      // SolanaFM API endpoint for wallet labels
-      const response = await axios.post('https://api.solana.fm/v1/addresses/labels', {
-        addresses: addresses.slice(0, 100) // Batch size limit
-      });
-      
-      return response.data.map((item: any) => ({
-        address: item.address,
-        label: item.label,
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (this.solanafmApiKey) headers['x-api-key'] = this.solanafmApiKey;
+      // SolanaFM API endpoint for wallet labels (batch up to 100)
+      const response = await axios.post(
+        'https://api.solana.fm/v1/addresses/labels',
+        { addresses: addresses.slice(0, 100) },
+        { headers }
+      );
+
+      const data = Array.isArray(response.data) ? response.data : (response.data?.data ?? []);
+      return data.map((item: any) => ({
+        address: item.address || item.accountHash || '',
+        label: item.label || item.friendlyName,
         type: item.type,
         category: item.category
       }));
@@ -154,109 +185,84 @@ export class SolanaService {
   }
 
   async fetchWalletTransactions(walletAddress: string, limit: number = 100): Promise<TransactionData[]> {
+    const connections = [this.connection, this.fallbackConnection, this.backupConnection];
     try {
       const pubkey = new PublicKey(walletAddress);
-      const signatures = await this.connection.getSignaturesForAddress(pubkey, { limit });
+
+      // Try to fetch signatures across connections
+      let signatures: any[] | null = null;
+      let sigConnIndex = 0;
+      for (let i = 0; i < connections.length; i++) {
+        try {
+          signatures = await connections[i].getSignaturesForAddress(pubkey, { limit });
+          sigConnIndex = i;
+          break;
+        } catch (e) {
+          continue;
+        }
+      }
+      if (!signatures || signatures.length === 0) return [];
 
       const transactions: TransactionData[] = [];
 
-      for (const sigInfo of signatures.slice(0, 50)) { // increase sample size a bit
-        try {
-          const tx = await this.connection.getParsedTransaction(sigInfo.signature, {
-            maxSupportedTransactionVersion: 0,
-          });
+      // Process a limited number of signatures to avoid rate limits
+      for (const sigInfo of signatures.slice(0, Math.min(100, limit))) {
+        let parsed: any | null = null;
+        const currentSig = sigInfo.signature;
+        const currentBlockTime = sigInfo.blockTime || 0;
 
-          if (!tx) continue;
+        // Try parsing on the same conn, then others
+        for (let i = 0; i < connections.length; i++) {
+          const idx = (sigConnIndex + i) % connections.length;
+          try {
+            parsed = await connections[idx].getParsedTransaction(currentSig, {
+              maxSupportedTransactionVersion: 0,
+            });
+            if (parsed) break;
+          } catch (e) {
+            continue;
+          }
+        }
+        if (!parsed) continue;
 
-          const addTransfer = (source: string, destination: string, lamports: number) => {
-            const amount = lamports / 1e9;
-            if (destination === walletAddress) {
-              transactions.push({
-                signature: sigInfo.signature,
-                blockTime: sigInfo.blockTime || 0,
-                amount,
-                from: source,
-                to: destination,
-                type: 'in',
-              });
-            } else if (source === walletAddress) {
-              transactions.push({
-                signature: sigInfo.signature,
-                blockTime: sigInfo.blockTime || 0,
-                amount,
-                from: source,
-                to: destination,
-                type: 'out',
-              });
-            }
-          };
+        const addTransfer = (source: string, destination: string, lamports: number) => {
+          const amount = lamports / 1e9;
+          if (destination === walletAddress) {
+            transactions.push({
+              signature: currentSig,
+              blockTime: currentBlockTime,
+              amount,
+              from: source,
+              to: destination,
+              type: 'in',
+            });
+          } else if (source === walletAddress) {
+            transactions.push({
+              signature: currentSig,
+              blockTime: currentBlockTime,
+              amount,
+              from: source,
+              to: destination,
+              type: 'out',
+            });
+          }
+        };
 
-          // Top-level instructions
-          for (const ix of tx.transaction.message.instructions as any[]) {
-            if (ix.program === 'system' && ix.parsed?.type === 'transfer') {
+        // Top-level system transfers
+        for (const ix of (parsed.transaction.message.instructions as any[]) || []) {
+          if (ix.program === 'system' && (ix.parsed?.type === 'transfer' || ix.parsed?.type === 'transferWithSeed')) {
+            const info = ix.parsed.info;
+            addTransfer(info.source, info.destination, Number(info.lamports) || 0);
+          }
+        }
+        // Inner instructions
+        const inner = (parsed.meta as any)?.innerInstructions || [];
+        for (const innerGroup of inner) {
+          for (const ix of innerGroup.instructions || []) {
+            if (ix.program === 'system' && (ix.parsed?.type === 'transfer' || ix.parsed?.type === 'transferWithSeed')) {
               const info = ix.parsed.info;
               addTransfer(info.source, info.destination, Number(info.lamports) || 0);
             }
-          }
-
-          // Inner instructions
-          const inner = (tx.meta as any)?.innerInstructions || [];
-          for (const innerGroup of inner) {
-            for (const ix of innerGroup.instructions || []) {
-              if (ix.program === 'system' && ix.parsed?.type === 'transfer') {
-                const info = ix.parsed.info;
-                addTransfer(info.source, info.destination, Number(info.lamports) || 0);
-              }
-            }
-          }
-        } catch (txError) {
-          // Retry on fallback connection if parsing failed
-          try {
-            const alt = await this.fallbackConnection.getParsedTransaction(sigInfo.signature, {
-              maxSupportedTransactionVersion: 0,
-            });
-            if (!alt) continue;
-
-            const addTransferAlt = (source: string, destination: string, lamports: number) => {
-              const amount = lamports / 1e9;
-              if (destination === walletAddress) {
-                transactions.push({
-                  signature: sigInfo.signature,
-                  blockTime: sigInfo.blockTime || 0,
-                  amount,
-                  from: source,
-                  to: destination,
-                  type: 'in',
-                });
-              } else if (source === walletAddress) {
-                transactions.push({
-                  signature: sigInfo.signature,
-                  blockTime: sigInfo.blockTime || 0,
-                  amount,
-                  from: source,
-                  to: destination,
-                  type: 'out',
-                });
-              }
-            };
-
-            for (const ix of alt.transaction.message.instructions as any[]) {
-              if (ix.program === 'system' && ix.parsed?.type === 'transfer') {
-                const info = ix.parsed.info;
-                addTransferAlt(info.source, info.destination, Number(info.lamports) || 0);
-              }
-            }
-            const inner = (alt.meta as any)?.innerInstructions || [];
-            for (const innerGroup of inner) {
-              for (const ix of innerGroup.instructions || []) {
-                if (ix.program === 'system' && ix.parsed?.type === 'transfer') {
-                  const info = ix.parsed.info;
-                  addTransferAlt(info.source, info.destination, Number(info.lamports) || 0);
-                }
-              }
-            }
-          } catch (fallbackErr) {
-            console.warn(`Failed to parse transaction ${sigInfo.signature}:`, fallbackErr);
           }
         }
       }
@@ -274,7 +280,7 @@ export class SolanaService {
       const walletLabel = labels[0];
       
       // Filter A: Exclude Known Protocol & Exchange Wallets
-      if (config.excludeExchanges && this.isExchangeOrProtocolWallet(walletLabel)) {
+      if (config.excludeExchanges && this.isExchangeOrProtocolWallet(walletAddress, walletLabel)) {
         return false;
       }
       
@@ -305,16 +311,14 @@ export class SolanaService {
     }
   }
 
-  private isExchangeOrProtocolWallet(label: WalletLabel): boolean {
-    if (!label.label && !label.type && !label.category) return false;
-    
-    const exchangeKeywords = ['exchange', 'binance', 'coinbase', 'kraken', 'okx', 'bybit', 'cex'];
-    const protocolKeywords = ['jupiter', 'raydium', 'orca', 'serum', 'mango', 'protocol'];
-    
+  private isExchangeOrProtocolWallet(walletAddress: string, label: WalletLabel): boolean {
+    if (BLOCKLIST_ADDRESSES.has(walletAddress)) return true;
+    if (!label || (!label.label && !label.type && !label.category)) return false;
+
     const text = `${label.label || ''} ${label.type || ''} ${label.category || ''}`.toLowerCase();
-    
-    return exchangeKeywords.some(keyword => text.includes(keyword)) ||
-           protocolKeywords.some(keyword => text.includes(keyword));
+
+    return EXCHANGE_KEYWORDS.some(keyword => text.includes(keyword)) ||
+           PROTOCOL_KEYWORDS.some(keyword => text.includes(keyword));
   }
 
   private isBotLikeBehavior(transactions: TransactionData[], config: FilterConfig): boolean {

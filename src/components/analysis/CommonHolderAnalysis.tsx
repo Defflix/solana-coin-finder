@@ -44,8 +44,18 @@ const CommonHolderAnalysis = ({ settings }: { settings: PlatformSettingsProps })
     botFrequencyThreshold: 50,
   });
 
-  const solanaServicePrimary = new SolanaService(settings.rpcEndpoint, settings.secondaryRpcEndpoint, settings.backupRpcEndpoint);
-  const solanaServiceSecondary = new SolanaService(settings.secondaryRpcEndpoint, settings.rpcEndpoint, settings.backupRpcEndpoint);
+  const solanaServicePrimary = new SolanaService(
+    settings.rpcEndpoint,
+    settings.secondaryRpcEndpoint,
+    settings.backupRpcEndpoint,
+    settings.solanafmApiKey
+  );
+  const solanaServiceSecondary = new SolanaService(
+    settings.secondaryRpcEndpoint,
+    settings.rpcEndpoint,
+    settings.backupRpcEndpoint,
+    settings.solanafmApiKey
+  );
 
   const validateTokenAddress = (address: string): boolean => {
     try {
@@ -88,50 +98,63 @@ const CommonHolderAnalysis = ({ settings }: { settings: PlatformSettingsProps })
     setProcessingStatus(initialStatus);
 
     try {
-      const filteredResults: string[][] = Array.from({ length: addresses.length }, () => []);
-      let completed = 0;
+      // 1) Fetch holders for all tokens quickly in parallel (alternate RPCs)
+      const holdersLists: string[][] = await Promise.all(
+        addresses.map((addr, i) =>
+          (i % 2 === 0 ? solanaServicePrimary : solanaServiceSecondary)
+            .fetchTokenHolders(addr)
+            .then((list) => {
+              setProcessingStatus((prev) => prev.map((s) => s.tokenAddress === addr ? { ...s, status: 'completed', walletsFound: list.length } : s));
+              return list;
+            })
+            .catch((e) => {
+              setProcessingStatus((prev) => prev.map((s) => s.tokenAddress === addr ? { ...s, status: 'error', error: e instanceof Error ? e.message : 'Unknown error' } : s));
+              return [] as string[];
+            })
+        )
+      );
 
-      const processToken = async (index: number, address: string, svc: SolanaService) => {
-        // Mark as processing
-        setProcessingStatus(prev => prev.map(s => s.tokenAddress === address ? { ...s, status: 'processing' } : s));
-        try {
-          const allWallets = await svc.fetchTokenHolders(address);
-
-          const filteredWallets: string[] = [];
-          for (const wallet of allWallets) {
-            const isHuman = await svc.isHumanTrader(wallet, filterConfig);
-            if (isHuman) filteredWallets.push(wallet);
-          }
-
-          filteredResults[index] = filteredWallets;
-          setProcessingStatus(prev => prev.map(s => s.tokenAddress === address ? { ...s, status: 'completed', walletsFound: allWallets.length, filteredWallets: filteredWallets.length } : s));
-        } catch (e) {
-          setProcessingStatus(prev => prev.map(s => s.tokenAddress === address ? { ...s, status: 'error', error: e instanceof Error ? e.message : 'Unknown error' } : s));
-        } finally {
-          completed += 1;
-          setProgress((completed / addresses.length) * 100);
-        }
-      };
-
-      // Alternate RPC providers across tokens for parallelization
-      await Promise.all(addresses.map((addr, i) => processToken(i, addr, i % 2 === 0 ? solanaServicePrimary : solanaServiceSecondary)));
-
-      // Compute intersection
-      const nonEmpty = filteredResults.filter(arr => arr.length > 0);
-      if (nonEmpty.length > 0) {
-        let common = new Set(nonEmpty[0]);
-        for (let i = 1; i < nonEmpty.length; i++) {
-          const current = new Set(nonEmpty[i]);
-          common = new Set([...common].filter(x => current.has(x)));
-        }
-        const commonArr = Array.from(common);
-        setCommonWallets(commonArr);
-        toast({ title: "Analysis Complete", description: `Found ${commonArr.length} common high-quality wallet addresses` });
-      } else {
-        toast({ title: "No Results", description: "No qualifying wallets found across the provided tokens" });
+      // 2) Intersect holders to get only common wallets
+      const nonEmpty = holdersLists.filter((l) => l.length > 0);
+      if (nonEmpty.length === 0) {
+        setIsProcessing(false);
+        toast({ title: 'No Results', description: 'No holders found for the provided tokens' });
+        return;
       }
+      let common = new Set(nonEmpty[0]);
+      for (let i = 1; i < nonEmpty.length; i++) {
+        const s = new Set(nonEmpty[i]);
+        common = new Set([...common].filter((x) => s.has(x)));
+      }
+      let commonArr = Array.from(common);
+      setProgress(60);
+
+      // 3) Apply filters ONLY to common wallets (if enabled)
+      const filteringEnabled = filterConfig.excludeExchanges || filterConfig.excludeDustWallets || filterConfig.excludeBots || filterConfig.useHumanHeuristics;
+      if (filteringEnabled) {
+        const filtered: string[] = [];
+        let done = 0;
+        for (const [idx, w] of commonArr.entries()) {
+          const svc = idx % 2 === 0 ? solanaServicePrimary : solanaServiceSecondary;
+          // eslint-disable-next-line no-await-in-loop
+          const ok = await svc.isHumanTrader(w, filterConfig);
+          if (ok) filtered.push(w);
+          done += 1;
+          setProgress(60 + Math.round((done / commonArr.length) * 40));
+        }
+        commonArr = filtered;
+      } else {
+        setProgress(100);
+      }
+
+      setCommonWallets(commonArr);
+
+      // Update per-token status to reflect final filtered count
+      setProcessingStatus((prev) => prev.map((s) => ({ ...s, filteredWallets: commonArr.length, status: s.status === 'error' ? s.status : 'completed' })));
+
+      toast({ title: 'Analysis Complete', description: `Found ${commonArr.length} common wallet addresses` });
     } catch (error) {
-      toast({ title: "Error", description: "An unexpected error occurred during processing", variant: "destructive" });
+      toast({ title: 'Error', description: 'An unexpected error occurred during processing', variant: 'destructive' });
     } finally {
       setIsProcessing(false);
     }

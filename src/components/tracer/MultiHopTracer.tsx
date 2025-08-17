@@ -38,7 +38,7 @@ const MultiHopTracer = ({ settings }: { settings: PlatformSettingsProps }) => {
   const [selectedWallet, setSelectedWallet] = useState<string | null>(null);
   const { toast } = useToast();
 
-  const solanaService = new SolanaService(settings.rpcEndpoint, settings.secondaryRpcEndpoint, settings.backupRpcEndpoint);
+  const solanaService = new SolanaService(settings.rpcEndpoint, settings.secondaryRpcEndpoint, settings.backupRpcEndpoint, settings.solanafmApiKey);
 
   const validateWalletAddress = (address: string): boolean => {
     try {
