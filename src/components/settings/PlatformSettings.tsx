@@ -8,7 +8,8 @@ import { useToast } from '@/hooks/use-toast';
 
 interface PlatformSettingsProps {
   rpcEndpoint: string;
-  fallbackRpcEndpoint: string;
+  secondaryRpcEndpoint: string;
+  backupRpcEndpoint: string;
   solanafmApiKey?: string;
 }
 
@@ -29,8 +30,9 @@ const PlatformSettings = ({ settings, onSettingsChange }: SettingsComponentProps
 
   const resetToDefaults = () => {
     onSettingsChange({
-      rpcEndpoint: 'https://api.mainnet-beta.solana.com',
-      fallbackRpcEndpoint: 'https://solana-rpc.publicnode.com',
+      rpcEndpoint: 'https://solana.rpc.grove.city/v1/01fdb492',
+      secondaryRpcEndpoint: 'https://go.getblock.us/86aac42ad4484f3c813079afc201451c',
+      backupRpcEndpoint: 'https://solana-rpc.publicnode.com',
       solanafmApiKey: '',
     });
     
@@ -65,16 +67,30 @@ const PlatformSettings = ({ settings, onSettingsChange }: SettingsComponentProps
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="fallback-rpc">Fallback RPC Endpoint</Label>
+            <Label htmlFor="secondary-rpc">Secondary RPC Endpoint</Label>
             <Input
-              id="fallback-rpc"
-              value={settings.fallbackRpcEndpoint}
-              onChange={(e) => onSettingsChange({ ...settings, fallbackRpcEndpoint: e.target.value })}
+              id="secondary-rpc"
+              value={settings.secondaryRpcEndpoint}
+              onChange={(e) => onSettingsChange({ ...settings, secondaryRpcEndpoint: e.target.value })}
+              placeholder="https://go.getblock.us/86aac42ad4484f3c813079afc201451c"
+              className="bg-secondary/50 border-border/50"
+            />
+            <p className="text-xs text-muted-foreground">
+              Secondary provider used in parallel and for retries
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="backup-rpc">Backup RPC Endpoint</Label>
+            <Input
+              id="backup-rpc"
+              value={settings.backupRpcEndpoint}
+              onChange={(e) => onSettingsChange({ ...settings, backupRpcEndpoint: e.target.value })}
               placeholder="https://solana-rpc.publicnode.com"
               className="bg-secondary/50 border-border/50"
             />
             <p className="text-xs text-muted-foreground">
-              Backup endpoint used when primary RPC fails or rate limits
+              Fallback endpoint if both primary and secondary fail
             </p>
           </div>
 

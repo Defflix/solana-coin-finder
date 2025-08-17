@@ -23,7 +23,8 @@ interface WalletFlow {
 
 interface PlatformSettingsProps {
   rpcEndpoint: string;
-  fallbackRpcEndpoint: string;
+  secondaryRpcEndpoint: string;
+  backupRpcEndpoint: string;
   solanafmApiKey?: string;
 }
 
@@ -37,7 +38,7 @@ const MultiHopTracer = ({ settings }: { settings: PlatformSettingsProps }) => {
   const [selectedWallet, setSelectedWallet] = useState<string | null>(null);
   const { toast } = useToast();
 
-  const solanaService = new SolanaService(settings.rpcEndpoint, settings.fallbackRpcEndpoint);
+  const solanaService = new SolanaService(settings.rpcEndpoint, settings.secondaryRpcEndpoint, settings.backupRpcEndpoint);
 
   const validateWalletAddress = (address: string): boolean => {
     try {

@@ -8,14 +8,16 @@ import PlatformSettings from './settings/PlatformSettings';
 
 interface PlatformSettings {
   rpcEndpoint: string;
-  fallbackRpcEndpoint: string;
+  secondaryRpcEndpoint: string;
+  backupRpcEndpoint: string;
   solanafmApiKey?: string;
 }
 
 const WalletIntelligencePlatform = () => {
   const [settings, setSettings] = useState<PlatformSettings>({
-    rpcEndpoint: 'https://api.mainnet-beta.solana.com',
-    fallbackRpcEndpoint: 'https://solana-rpc.publicnode.com',
+    rpcEndpoint: 'https://solana.rpc.grove.city/v1/01fdb492',
+    secondaryRpcEndpoint: 'https://go.getblock.us/86aac42ad4484f3c813079afc201451c',
+    backupRpcEndpoint: 'https://solana-rpc.publicnode.com',
   });
 
   return (

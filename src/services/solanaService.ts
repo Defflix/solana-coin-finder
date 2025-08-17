@@ -29,10 +29,12 @@ export interface FilterConfig {
 export class SolanaService {
   private connection: Connection;
   private fallbackConnection: Connection;
+  private backupConnection: Connection;
 
-  constructor(rpcEndpoint: string, fallbackRpcEndpoint: string) {
+  constructor(rpcEndpoint: string, fallbackRpcEndpoint: string, backupRpcEndpoint: string = 'https://solana-rpc.publicnode.com') {
     this.connection = new Connection(rpcEndpoint, 'confirmed');
     this.fallbackConnection = new Connection(fallbackRpcEndpoint, 'confirmed');
+    this.backupConnection = new Connection(backupRpcEndpoint, 'confirmed');
   }
 
   async fetchTokenHolders(tokenAddress: string): Promise<string[]> {
@@ -97,7 +99,37 @@ export class SolanaService {
 
         return Array.from(walletAddresses);
       } catch (fallbackError) {
-        throw new Error(`Failed to fetch holders for token: ${tokenAddress}`);
+        console.error('Fallback RPC failed, trying backup...', fallbackError);
+        try {
+          const mintKey = new PublicKey(tokenAddress);
+          const tokenAccounts = await this.backupConnection.getProgramAccounts(
+            new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
+            {
+              filters: [
+                {
+                  dataSize: 165,
+                },
+                {
+                  memcmp: {
+                    offset: 0,
+                    bytes: mintKey.toBase58(),
+                  },
+                },
+              ],
+            }
+          );
+
+          const walletAddresses = new Set<string>();
+          tokenAccounts.forEach(account => {
+            const ownerBytes = account.account.data.slice(32, 64);
+            const owner = new PublicKey(ownerBytes).toBase58();
+            walletAddresses.add(owner);
+          });
+
+          return Array.from(walletAddresses);
+        } catch (backupError) {
+          throw new Error(`Failed to fetch holders for token: ${tokenAddress}`);
+        }
       }
     }
   }
@@ -125,39 +157,110 @@ export class SolanaService {
     try {
       const pubkey = new PublicKey(walletAddress);
       const signatures = await this.connection.getSignaturesForAddress(pubkey, { limit });
-      
+
       const transactions: TransactionData[] = [];
-      
-      for (const sigInfo of signatures.slice(0, 20)) { // Limit for performance
+
+      for (const sigInfo of signatures.slice(0, 50)) { // increase sample size a bit
         try {
-          const tx = await this.connection.getParsedTransaction(sigInfo.signature);
-          if (tx && tx.meta) {
-            const preBalances = tx.meta.preBalances;
-            const postBalances = tx.meta.postBalances;
-            const accountKeys = tx.transaction.message.accountKeys;
-            
-            // Find SOL transfers
-            for (let i = 0; i < accountKeys.length; i++) {
-              const account = accountKeys[i];
-              const balanceChange = postBalances[i] - preBalances[i];
-              
-              if (Math.abs(balanceChange) > 0) {
-                transactions.push({
-                  signature: sigInfo.signature,
-                  blockTime: sigInfo.blockTime || 0,
-                  amount: Math.abs(balanceChange) / 1e9, // Convert lamports to SOL
-                  from: balanceChange < 0 ? account.pubkey.toBase58() : '',
-                  to: balanceChange > 0 ? account.pubkey.toBase58() : '',
-                  type: balanceChange > 0 ? 'in' : 'out'
-                });
+          const tx = await this.connection.getParsedTransaction(sigInfo.signature, {
+            maxSupportedTransactionVersion: 0,
+          });
+
+          if (!tx) continue;
+
+          const addTransfer = (source: string, destination: string, lamports: number) => {
+            const amount = lamports / 1e9;
+            if (destination === walletAddress) {
+              transactions.push({
+                signature: sigInfo.signature,
+                blockTime: sigInfo.blockTime || 0,
+                amount,
+                from: source,
+                to: destination,
+                type: 'in',
+              });
+            } else if (source === walletAddress) {
+              transactions.push({
+                signature: sigInfo.signature,
+                blockTime: sigInfo.blockTime || 0,
+                amount,
+                from: source,
+                to: destination,
+                type: 'out',
+              });
+            }
+          };
+
+          // Top-level instructions
+          for (const ix of tx.transaction.message.instructions as any[]) {
+            if (ix.program === 'system' && ix.parsed?.type === 'transfer') {
+              const info = ix.parsed.info;
+              addTransfer(info.source, info.destination, Number(info.lamports) || 0);
+            }
+          }
+
+          // Inner instructions
+          const inner = (tx.meta as any)?.innerInstructions || [];
+          for (const innerGroup of inner) {
+            for (const ix of innerGroup.instructions || []) {
+              if (ix.program === 'system' && ix.parsed?.type === 'transfer') {
+                const info = ix.parsed.info;
+                addTransfer(info.source, info.destination, Number(info.lamports) || 0);
               }
             }
           }
         } catch (txError) {
-          console.warn(`Failed to parse transaction ${sigInfo.signature}:`, txError);
+          // Retry on fallback connection if parsing failed
+          try {
+            const alt = await this.fallbackConnection.getParsedTransaction(sigInfo.signature, {
+              maxSupportedTransactionVersion: 0,
+            });
+            if (!alt) continue;
+
+            const addTransferAlt = (source: string, destination: string, lamports: number) => {
+              const amount = lamports / 1e9;
+              if (destination === walletAddress) {
+                transactions.push({
+                  signature: sigInfo.signature,
+                  blockTime: sigInfo.blockTime || 0,
+                  amount,
+                  from: source,
+                  to: destination,
+                  type: 'in',
+                });
+              } else if (source === walletAddress) {
+                transactions.push({
+                  signature: sigInfo.signature,
+                  blockTime: sigInfo.blockTime || 0,
+                  amount,
+                  from: source,
+                  to: destination,
+                  type: 'out',
+                });
+              }
+            };
+
+            for (const ix of alt.transaction.message.instructions as any[]) {
+              if (ix.program === 'system' && ix.parsed?.type === 'transfer') {
+                const info = ix.parsed.info;
+                addTransferAlt(info.source, info.destination, Number(info.lamports) || 0);
+              }
+            }
+            const inner = (alt.meta as any)?.innerInstructions || [];
+            for (const innerGroup of inner) {
+              for (const ix of innerGroup.instructions || []) {
+                if (ix.program === 'system' && ix.parsed?.type === 'transfer') {
+                  const info = ix.parsed.info;
+                  addTransferAlt(info.source, info.destination, Number(info.lamports) || 0);
+                }
+              }
+            }
+          } catch (fallbackErr) {
+            console.warn(`Failed to parse transaction ${sigInfo.signature}:`, fallbackErr);
+          }
         }
       }
-      
+
       return transactions;
     } catch (error) {
       console.error('Failed to fetch wallet transactions:', error);
